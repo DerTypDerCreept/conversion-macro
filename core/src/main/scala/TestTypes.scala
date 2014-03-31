@@ -36,14 +36,14 @@ trait Expr extends FixNumber{
 }
 // */
 // paradise benchmark in "scrap your boilerplate"
-//@convert
+@convert
 trait Companies {
   case class Company(departments: List[Department])
   case class Department(name: Name, manager: Manager, dUnits: List[DUnit])
   trait DUnit
+  case class Employee(person: Person, salary: Salary)
   case class PU(employee: Employee) extends DUnit
   case class DU(department: Department) extends DUnit
-  case class Employee(person: Person, salary: Salary)
   case class Person(name: Name, address: Address)
   case class Salary(amount: Float)
   type Manager = Employee
@@ -64,7 +64,7 @@ trait Companies {
 }
 
 // binary trees with arbitrary uniform data at leaves
-//@convert
+@convert
 trait BinTrees {
   trait BinTree[A]
   case class Leaf[A](get: A) extends BinTree[A]

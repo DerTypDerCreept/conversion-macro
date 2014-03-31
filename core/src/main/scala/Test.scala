@@ -79,7 +79,7 @@ object Test extends App with ConvertMe with Expr{
 trait DataTypes
 extends Companies
    with BinTrees
-/*
+///*
 class BinTreeSanityTest extends FlatSpec with DataTypes {
   "completeBinaryTree" should "produce complete binary trees" in {
     val List(bin1, bin2, bin3, bin4, bin5, bin6, bin7, bin8, bin9) =
@@ -96,11 +96,11 @@ class BinTreeSanityTest extends FlatSpec with DataTypes {
     assert(bin9 == Bin(Bin(Bin(Bin(1, 2), 3), Bin(4, 5)), Bin(Bin(6, 7), Bin(8, 9))))
   }
 }
-*/
+// */
 // this example is for correctness.
 // @converMe macro doesn't make it easier to write
 // due to not supporting mutually recursive data types.
-/*
+//*
 class SelectSalary extends FlatSpec with DataTypes {
 
   // collects all salary nodes in a list
@@ -125,7 +125,7 @@ class SelectSalary extends FlatSpec with DataTypes {
     assert(sortedSalaries == List[Float](1000, 2000, 8000, 100000).map(Salary.apply))
   }
 }
-*/
+// */
 object NoReturn {
   def map[T](f: Unit => T): T = f(())
 }
