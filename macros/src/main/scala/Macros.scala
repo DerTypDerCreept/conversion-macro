@@ -17,11 +17,11 @@ object convertMacro {
         //represents the trait, we wish to treat as the fixed Point
         case class FixedPoint(name: TypeName, typeParams: List[TypeDef])
         //represents a case class
-        case class Variant(name: TypeName, typeParams: List[TypeDef], valParams: List[ValDef])
-		case class VariantV2(name: TypeName, typeParams: List[TypeDef], valParams: List[ValDef], extend: Tree, extendTypes: List[Tree])
+        //case class Variant(name: TypeName, typeParams: List[TypeDef], valParams: List[ValDef])
+		case class Variant(name: TypeName, typeParams: List[TypeDef], valParams: List[ValDef], extend: Tree, extendTypes: List[Tree])
         //contains a FixedPoint and a list of variants
-        case class BusinessInput(fixed: FixedPoint, variants: List[Variant], passThrough: List[Tree])
-		case class BusinessInputV2(fixed: List[FixedPoint], variants: List[VariantV2], passThrough: List[Tree])
+        //case class BusinessInput(fixed: FixedPoint, variants: List[Variant], passThrough: List[Tree])
+		case class BusinessInput(fixed: List[FixedPoint], variants: List[Variant], passThrough: List[Tree])
     
         //extracts the body of a ModuleDef
         def extractDefList(x:Tree):List[Tree] = x match {
@@ -34,37 +34,18 @@ object convertMacro {
         }
         //takes a list of Trees and returns the first trait
         //as an instance of FixedPoint
-        def findFixedPoint(raw: List[Tree]): FixedPoint = raw match {
-            case q"trait $traitname[..$types]" :: tail => FixedPoint(traitname,reconstructTypes(types).asInstanceOf[List[TypeDef]])
+		def findFixedPoint(raw: List[Tree]): List[FixedPoint] = raw match {
+            case q"trait $traitname[..$types]" :: tail => FixedPoint(traitname,reconstructTypes(types).asInstanceOf[List[TypeDef]]) :: findFixedPoint(tail)
             case head :: tail => findFixedPoint(tail)
-            case _ => throw new Exception("Could not find Fixed Point (no trait in annotated object)")
-        }
-		/*def findFixedPointV2(raw: List[Tree]): FixedPoint = raw match {
-            case q"trait $traitname[..$types]" :: tail => FixedPoint(traitname,reconstructTypes(types).asInstanceOf[List[TypeDef]])
-            case head :: tail => findFixedPointV2(tail)
-            case _ => null//throw new Exception("Could not find Fixed Point (no trait in annotated object)")
-        }
-		*/
-		def findFixedPointV2(raw: List[Tree]): List[FixedPoint] = raw match {
-            case q"trait $traitname[..$types]" :: tail => FixedPoint(traitname,reconstructTypes(types).asInstanceOf[List[TypeDef]]) :: findFixedPointV2(tail)
-            case head :: tail => findFixedPointV2(tail)
             case _ => Nil//throw new Exception("Could not find Fixed Point (no trait in annotated object)")
         }
         //takes a list of Trees  and the name of a Type
         //and filters the list for case classes extending the given type
         //turning them into Variants
-        def findVariants(raw: List[Tree], fixed: TypeName): List[Variant] = raw match{
+		def findVariants(raw: List[Tree]): List[Variant] = raw match{
             case q"case class $name[..$types](..$fields) extends $fix[..$smth]" :: tail
-              if fix.toString == fixed.toString => 
-                Variant(name,reconstructTypes(types).asInstanceOf[List[TypeDef]],fields) :: findVariants(tail,fixed)
-            case head :: tail => findVariants(tail,fixed)
-            case Nil => Nil
-            case _ => throw new Exception("Find Variants Malfunctioned")
-        }
-		def findVariantsV2(raw: List[Tree]): List[VariantV2] = raw match{
-            case q"case class $name[..$types](..$fields) extends $fix[..$smth]" :: tail
-              => VariantV2(name,reconstructTypes(types).asInstanceOf[List[TypeDef]],fields,fix,smth) :: findVariantsV2(tail)
-            case head :: tail => findVariantsV2(tail)
+              => Variant(name,reconstructTypes(types).asInstanceOf[List[TypeDef]],fields,fix,smth) :: findVariants(tail)
+            case head :: tail => findVariants(tail)
             case Nil => Nil
             case _ => throw new Exception("Find Variants Malfunctioned")
         }
@@ -79,8 +60,6 @@ object convertMacro {
         def reconstructTypes(x:List[Tree]):List[Tree] = x match{
             case TypeDef(a,b,c,d) :: tail => TypeDef(a,b,c,reconstructTypesSub(d)) :: reconstructTypes(tail)
             case AppliedTypeTree(a,b) :: tail => AppliedTypeTree(reconstructTypes(List(a)).head,reconstructTypes(b)) :: reconstructTypes(tail)
-            //case AppliedTypeTree(Select(Select(a, b), c), d) :: tail => AppliedTypeTree(Select(Select(a, newTermName(b.toString)), c), d) :: reconstructTypes(tail) 
-            //case Select(Select(a, b), c) :: tail => Select(Select(a, newTermName(b.toString)), c) :: reconstructTypes(tail) 
             case head :: tail => head :: reconstructTypes(tail)
             case Nil => Nil
         }
@@ -142,12 +121,7 @@ object convertMacro {
             case AppliedTypeTree(a,b) :: rest => AppliedTypeTree(a,typeDefsToTypeRefs(b)) :: typeDefsToTypeRefs(rest)
             case _ => x
             }
-        //applyDefinedValsOfTypeTo takes a list of valDefs, a type reference and a function name
-        //                    and returns a List, where ValDefs are replaced with a reference to them
-        //                    except for when the parameters they define are of the given type, then the
-        //                      function is applied to the parameter defined by the current ValDef
         def applyDefinedValsOfTypeTo(x:List[ValDef], typ:Tree, funName:Ident ):List[Tree] = x match {
-            //case ValDef(a,b,`typ`,d) :: z => Apply(funName,List(Ident(b))) :: applyDefinedValsOfTypeTo(z,typ,funName) 
             case ValDef(a,b,c,d) :: z => {
                 if (c.canEqual(typ)) Apply(funName,List(Ident(b))) :: applyDefinedValsOfTypeTo(z,typ,funName)
                 else Ident(b) :: applyDefinedValsOfTypeTo(z,typ,funName) 
@@ -172,7 +146,6 @@ object convertMacro {
         //updateType
         def updateType(x:List[ValDef], name:Tree, types:List[Tree], newType:String ):List[ValDef] = x match {
             case ValDef(a,b,c,d) :: z => {
-                //println(showRaw(c))
                 q"class ignoreMe extends $c" match {
                     case q"class ignoreMe extends $name2[..$types2]" if(name.toString==name2.toString && types.toString==types2.toString) => ValDef(a,b,Ident(newTypeName(newType.toString)),d) :: updateType(z,name,types,newType.toString) 
                     case _ => ValDef(a,b,c,d) :: updateType(z,name,types,newType.toString)
@@ -183,7 +156,6 @@ object convertMacro {
         }
 		def countChilds(x:List[ValDef], name:Tree, types:List[Tree]):Int = x match {
             case ValDef(a,b,c,d) :: z  => {
-                //println(showRaw(c))
                 q"class ignoreMe extends $c" match {
                     case q"class ignoreMe extends $name2[..$types2]" if(name.toString==name2.toString && types.toString==types2.toString) => 1 + countChilds(z,name,types) 
                     case _ => 0 + countChilds(z,name,types)
@@ -194,7 +166,6 @@ object convertMacro {
         }
 		def nonChilds(x:List[ValDef], name:Tree, types:List[Tree]):List[ValDef] = x match {
             case ValDef(a,b,c,d) :: z  => {
-                //println(showRaw(c))
                 q"class ignoreMe extends $c" match {
                     case q"class ignoreMe extends $name2[..$types2]" if(name.toString==name2.toString && types.toString==types2.toString) => nonChilds(z,name,types) 
                     case _ => ValDef(a,b,c,d) :: nonChilds(z,name,types)
@@ -203,17 +174,12 @@ object convertMacro {
             case _ => Nil
         }
 		def createWildcards(x:List[Tree]):List[Tree] =
-			//q"x match {case u : Num[_] => Some(u.n)}" match{
-				//case q"x match {case u : $smth => Some(u.n)}" => throw new Exception(showRaw(smth))
-				//case q"x match {case u : Num[..$wilds] => Some(u.n)}" => 
 				x match {
 					case TypeDef(a,b,List(),d) :: tail => Bind(tpnme.WILDCARD, EmptyTree) :: createWildcards(tail)
 					case AppliedTypeTree(a,b) :: tail => Bind(tpnme.WILDCARD, EmptyTree) :: createWildcards(tail)
 					case Nil => Nil
 					case _ => throw new Exception("Could not create wildcards")
             }
-		//		case _ => throw new Exception("Could not create Wildcards")
-		//	}
         def expandFixedPoint(fixed: FixedPoint):List[Tree] = {
             //the additional type parameter
             val fixedType1 = q"type FFunctor"
@@ -245,7 +211,7 @@ object convertMacro {
             traitFixed ++ traitNormal
             
         }
-		def expandVariant3(variant:VariantV2) = {
+		def expandVariant3(variant:Variant) = {
 			List(createNormalClass(variant)) ++ List(createObject(variant))
         }
 		
@@ -274,7 +240,7 @@ object convertMacro {
 			case Nil => soFar
 		}
 		
-		def createPrivateClass(variant:VariantV2):Tree = {
+		def createPrivateClass(variant:Variant):Tree = {
             //the name of the original trait (which will now extend the new trait)
             val oldtrait = newTypeName(variant.extend.toString+"")
             //the name of the case class
@@ -291,7 +257,6 @@ object convertMacro {
 			val typeRef = typeDefsToTypeRefs(List(q"type $oldtrait[..${variant.typeParams}]"))
 			val typeRefs = typeDefsToTypeRefs(variant.typeParams)
 			val extendTypeParams = typeRefs ++ typeRef
-            //println(showRaw(q"this.x==b.x && a.y==b.y"))
 
 			val str = createPrintTree(paramReferences)
 			val toStr = if(str != null)
@@ -301,7 +266,6 @@ object convertMacro {
 						"""
 			else q"""override def toString() = ${variant.name.toString+"()"}"""
 			
-			//println(newName.toString + " has " + nonChilds(variant.valParams,Ident(oldtrait),originalTypes) + " as non Childs!")
 			val hh = createHashTree(valDefsToValRefs(nonChilds(variant.valParams,Ident(oldtrait),originalTypes)))
 			val hash = if(hh != null)
 				q"""override def hashCode():Int = $hh"""
@@ -327,10 +291,7 @@ object convertMacro {
 					else true
 				}
 				"""
-				//println(equal)
-				//println(showRaw(equal))
 			val body = toStr :: equal :: hash :: Nil	
-			//println(showRaw(q"""x.toString+","+y.toString"""))
 			val temp02 = q"${Ident(newTypeName(variant.name.toString))}[..$extendTypeParams]"
             val extendType = Apply(temp02,paramReferences)
 			val privateClass = if(paramReferences.length<1) q"private class $newName[..${variant.typeParams}](..${noCaseParams}) extends $oldName[..$extendTypeParams] with $oldtrait[..${typeDefsToTypeRefs(variant.typeParams)}]{..${body}}"
@@ -339,7 +300,7 @@ object convertMacro {
 			privateClass
 		}
 		
-		def createObject (variant:VariantV2):Tree = {
+		def createObject (variant:Variant):Tree = {
 			//the name for the fixed point (traitnameF)
             val newtrait = newTypeName(variant.extend.toString+"F")
             //the name of the original trait (which will now extend the new trait)
@@ -391,7 +352,7 @@ object convertMacro {
 			obj
 		}
 		
-		def createNormalClass(variant:VariantV2):Tree = {
+		def createNormalClass(variant:Variant):Tree = {
 			//the name for the fixed point (traitnameF)
             val newtrait = newTypeName(variant.extend.toString+"F")
             //the name of the original trait (which will now extend the new trait)
@@ -430,27 +391,16 @@ object convertMacro {
 				mapFun = q"def map[FFunctor2](g: FFunctor => FFunctor2): $newtrait[..$mapType] = new $className[..$mapType](..$paramReferences)"   //${Ident(newName)}(..$appliedParams)" //
             
 			val mapBody = List(mapFun)
-			//val normalClass = q"class ${variant.name}[..$updatedTypeParams](..${valDefsToNoCase(newParams)}) extends $newtrait[..${updatedTypeRefs}] {..$mapBody}"
 			val normalClass = q"class ${variant.name}[..$updatedTypeParams](..${valDefsToNoCasePlusVal(newParams)}) extends $newtrait[..${updatedTypeRefs}] {..$mapBody}"
 			normalClass
 		}
 		
-		def businessLogicV2(input: BusinessInputV2): List[Tree] = {
-            //val y = input.variants.iterator
-			//val z = input.fixed.iterator
-			
-            //var result:List[Tree] = Nil
-			//var result = 
-			//while(z.hasNext)
-			//	result = result ++ expandFixedPoint(z.next)
-            //while(y.hasNext)
-            //    result = result ++ expandVariantV2(y.next)
-            //result ++ input.passThrough
-			input.fixed.map(expandFixedPoint(_)).flatten ++ input.variants.map(expandVariant3(_)).flatten
+		def businessLogic(input: BusinessInput): List[Tree] = {
+			input.fixed.map(expandFixedPoint(_)).flatten ++ input.variants.map(expandVariant3(_)).flatten ++ input.passThrough
         }
-		def createInputV2(raw: List[Tree]): BusinessInputV2 = {
+		def createInput(raw: List[Tree]): BusinessInput = {
             //println(raw)
-            BusinessInputV2(findFixedPointV2(raw), findVariantsV2(raw), findOthers(raw))
+            BusinessInput(findFixedPoint(raw), findVariants(raw), findOthers(raw))
         }
 		def createOutputTrait(original: Tree): Tree = 
             original match {
@@ -459,13 +409,13 @@ object convertMacro {
 					templ match {case Template(a,b,c) => 
 						q"""
 						 trait $objectName extends ..$a{
-						   ..${businessLogicV2(createInputV2(extractDefListTrait(original)))}
+						   ..${businessLogic(createInput(extractDefListTrait(original)))}
 						}"""
 				}
 				case mod @ ModuleDef(a, objectName, templ) =>
                 q"""
                  object $objectName {
-                   ..${businessLogicV2(createInputV2(extractDefList(original)))}
+                   ..${businessLogic(createInput(extractDefList(original)))}
                 }"""
 			}
 		
@@ -476,43 +426,10 @@ object convertMacro {
             case (param: TypeDef) :: (rest @ (_ :: _)) => (param, rest)
             case _ => (EmptyTree, inputs)
         }      
-		//println("?"*75)
-		//println(showRaw(q"case class Num(n: Int) extends Exp"))
-		//println("?"*75)
-		//println(q"class Num[T](val a:Int)")
-		//println(showRaw(q"class Num[T](val a:Int)"))
-        /*println(q"""class Nil[T, FFunctor]() extends ListsF[T, FFunctor] {
-        def map[FFunctor2](g: FFunctor => FFunctor2): ListsF[T, FFunctor2] = new Nil()
-      }
-class Cons[T, FFunctor](val head: T, val tail: FFunctor) extends ListsF[T, FFunctor] {
-        def map[FFunctor2](g: FFunctor => FFunctor2): ListsF[T, FFunctor2] = new Cons(head, g(tail))
-      }
-
-object Nil {
-        private class NilF[T]() extends Nil[T, Lists[T]] with Lists[T]
-        def apply[T](): Lists[T] = new NilF()
-        def unapply[T, FFunctor](u: ListsF[T, FFunctor]): Boolean =
-          u.isInstanceOf[Nil[T, FFunctor]]
-      }
-object Cons {
-        private class ConsF[T](head: T, tail: Lists[T]) extends Cons[T, Lists[T]](head, tail) with Lists[T]
-        def apply[T](head: T, tail: Lists[T]): Lists[T] =
-          new ConsF(head, tail)
-
-        def unapply[T, FFunctor](u: ListsF[T, FFunctor]): Option[(T, FFunctor)] = u match {
-          case u: Cons[T, FFunctor] => Some((u.head, u.tail))
-          case _ => None
-        }
-      }""")*/
-	  //println("?"*75)
-	  //println(q"private class ConsF[T](head: T, tail: Lists[T]) extends Cons[T, Lists[T]](head, tail) with Lists[T]")
-	  //println(showRaw(q"private class ConsF[T](head: T, tail: Lists[T]) extends Cons[T, Lists[T]](head, tail) with Lists[T]"))
-      //println("?"*75) 
+		
         val res = createOutputTrait(expandees(0))
         val outputs = expandees
-        //println("?"*50)
-        //println(res)
-    
+
         c.Expr[Any](Block(List(res), Literal(Constant(()))))
     }    
 }

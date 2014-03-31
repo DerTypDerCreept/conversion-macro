@@ -2,9 +2,10 @@ object TestTypes{
 
 @convert
 trait ConvertMe{
+  //fixed Point
   trait Lists[T]
 
-  // a case class with a name as argument is always bound
+  //variants	
   case class Nil[T] extends Lists[T]
   case class Cons[T](head:T, tail:Lists[T]) extends Lists[T]
 }
