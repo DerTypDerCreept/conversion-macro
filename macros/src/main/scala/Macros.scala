@@ -13,6 +13,7 @@ object convertMacro {
         
         
         
+        
         //The new interface
         //represents the trait, we wish to treat as the fixed Point
         case class FixedPoint(name: TypeName, typeParams: List[TypeDef])

@@ -12,6 +12,7 @@ object TestTypes{
                 def fmap[A, B](f: A => B)(fa: Set[A]): Set[B] = fa map f
             }
     
+    
 
 @convert
 trait ConvertMe{
