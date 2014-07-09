@@ -1,4 +1,5 @@
 import language.higherKinds
+import language.implicitConversions
 object TestTypes{
 
 	trait Functor[F[_]] {
@@ -12,9 +13,8 @@ object TestTypes{
                 def fmap[A, B](f: A => B)(fa: Set[A]): Set[B] = fa map f
             }
     
-    
 
-@convert
+//@convert
 trait ConvertMe{
   trait Tree
   
@@ -24,9 +24,9 @@ trait ConvertMe{
 }
 @convert
 trait ConvertMe2{
-      trait Tree2
-  case class Leaf2(tag:Int) extends Tree2
-  case class Branch2(children:Set[Tree2]) extends Tree2 
+  trait Tree2[T]
+  case class Leaf2[T](tag:T) extends Tree2[T]
+  case class Branch2[T](children:Set[Tree2]) extends Tree2[T] 
   
 }
 
