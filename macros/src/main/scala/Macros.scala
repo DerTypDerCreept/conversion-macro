@@ -2,10 +2,91 @@ import scala.reflect.macros.Context
 import scala.language.experimental.macros
 import scala.annotation.StaticAnnotation
 
-class convert extends StaticAnnotation {
+/** The name of the Annotation, used to invoke the macro
+  *
+  * Annotate a trait or object with @converToGeneric, to convert all the traits and case classes,
+  * contained in it
+  *
+  * Remember to provide the definition of the Functor you wish to use
+  * the basic definition:
+  * trait Functor[F[_]] {
+  *      def fmap[A, B](f: A => B)(fa: F[A]): F[B]
+  * }
+  * the List Functor
+  * implicit def listFunctor: Functor[List] = new Functor[List] {
+  *     def fmap[A, B](f: A => B)(fa: List[A]): List[B] = fa map f
+  * }
+  *
+  *
+  *
+  * for example:
+  * @convertToGeneric
+  * trait ConvertMe{
+  *   trait Tree[T]
+  *   case class Leaf[T](tag:T) extends Tree[T]
+  *   case class Branch[T](children:List[Tree]) extends Tree[T] 
+  * }
+  * would convert to something like this:
+  * trait ConvertMe{
+  *   trait Tree[T] extends TreeF[T,Tree[T]]{
+  *     def fold[E](f: TreeF[T,E] => E): E = f(map (_ fold f))
+  *   }
+  *   
+  *   trait TreeF[T,R] {
+  *     def map[S](f: R => S)
+  *       (implicit sf: Functor[List]):
+  *         TreeF[T,S]
+  *   }
+  *    
+  *   object TreeF {
+  *     implicit def patternFunctor: Functor[({ type lambda[R] = $newtrait[T,R] })#lambda] = new Functor[({ type lambda[R] = $newtrait[T,R] })#lambda] {
+  *       def fmap[A, B](f: A => B)(fa: TreeF): TreeF = fa map f
+  *     }
+  *   }
+  *   
+  *   class Leaf[T,R](val tag: T) extends TreeF[T,R] {
+  *       def map[S](f: R => S)(implicit sf: Functor[List]): TreeF[T,S] = new Leaf[T,S](tag)
+  *       override def toString: String = s"Leaf($tag)"
+  *       override def equals(that:Any): Boolean = that match {
+  *         case Leaf(x) => x == tag
+  *         case _ => false
+  *       }
+  *       override def hashCode: Int = tag.hashCode     
+  *   }
+  *   object Leaf{
+  *     def apply[T](n:T):Tree[T] = new Leaf[T,Tree[T]](n) with Tree[T]
+  *     def unapply[T,R](tf:TreeF[T,R]): Option[T] = tf match{
+  *         case l:Leaf[T,R] => Some(l.tag)
+  *         case _ => None
+  *     }
+  *   }
+  *    
+  *   class Branch[T,R](val children: List[R]) extends TreeF[T,R] {
+  *     def map[S](f: R => S)(implicit sf: Functor[List]): TreeF[T,S] = new Branch(sf.fmap(f)(children))
+  *     override def toString: String = s"Branch(${children.toString})"
+  *     override def equals(that:Any): Boolean = that match {
+  *         case Branch(x) => x.equals(children)
+  *         case _ => false
+  *     }
+  *     override def hashCode: Int = children.map(_.hashCode).fold(0)((x:Int,y:Int)=>x+y)
+  *   }
+  *   object Branch{
+  *      def apply[T](l:List[Tree[T]]):Tree[T] = new Branch[T,Tree[T]](l) with Tree[T]//R?
+  *      def unapply[T,R](tf:TreeF[T,R]): Option[List[R]] = tf match{
+  *             case b:Branch[T,R] => Some(b.children)
+  *             case _ => None
+  *     }
+  *   }
+  * }
+ 
+  */
+class convertToGeneric extends StaticAnnotation {
     def macroTransform(annottees: Any*) = macro convertMacro.impl
 }
 
+/** This object contains the actual macro (in the impl function)
+ *  and should only be used via the @convertToGeneric annotation
+ */
 object convertMacro {
     def impl(c: Context)(annottees: c.Expr[Any]*): c.Expr[Any] = {
         import c.universe._
@@ -15,80 +96,177 @@ object convertMacro {
         
         //The new interface
         //represents the trait, we wish to treat as the fixed Point
+        /** A simplified representation of a trait, containing all the information, needed to construct the generic Traits
+          * 
+          * @constructor creates a representation of a Trait, using its name and its generic Types
+          * @param name the name of the trait 
+          * @param typeParams a List of TypeDefs (the generic types of the trait)
+          */
         case class FixedPoint(name: TypeName, typeParams: List[TypeDef])
-        //represents a case class
-        //case class Variant(name: TypeName, typeParams: List[TypeDef], valParams: List[ValDef])
+        /** A simplified representation of a case class, containing all the information, needed to construct the generic class and object
+          * 
+          * @constructor creates a representation of a case class, using its name and its generic Types
+          * @param name the name of the class 
+          * @param typeParams a List of TypeDefs (the generic types of the class)
+          * @param valParams a List of ValDefs containing the fields of the class
+          * @param extend the type, extended by this class
+          * @param extendTypes a List of Trees (the TypeRefs and applied TypeRefs, that are passed to the extended type)
+          */
         case class Variant(name: TypeName, typeParams: List[TypeDef], valParams: List[ValDef], extend: Tree, extendTypes: List[Tree])
-        //contains a FixedPoint and a list of variants
-        //case class BusinessInput(fixed: FixedPoint, variants: List[Variant], passThrough: List[Tree])
+        /** The Collection of traits and case classes that are to be converted, in their simplified forms, as well as other classes and objects, that are passed trough, unchanged
+          * 
+          * @constructor creates the simplified input, that can then be expanded by the macro
+          * @param fixed a List of traits (in their simplified form), that are to be expanded 
+          * @param variants a List of classes (in their simplified form), that are to be expanded
+          * @param passThrough a List of Trees, containing classes and objects, that are passed trough unchanged
+          */
         case class BusinessInput(fixed: List[FixedPoint], variants: List[Variant], passThrough: List[Tree])
     
-        //extracts the body of a ModuleDef
-        def extractDefList(x:Tree):List[Tree] = x match {
-            case ModuleDef(a, b, Template(_, _, list)) => list
-            case _ => throw new Exception("Could not extract Def List from"+x)
-        }
-        def extractDefListTrait(x:Tree):List[Tree] = x match {
+        /** returns a List of Trees, representing the contents of the object or trait that has been passed in
+          *
+          * matches the passed in Tree to a object and trait Definition and extracts the List of definitions contained in that object or trait
+          * returns the extracted List or throws an Exception if the passed in Tree was not an object or trait
+          *
+          * @param module the Tree representing the object or trait
+          * @return the List of Trees contained in the object or trait
+          * @throw Exception if the passed in Tree is not a object or trait
+          */
+        def extractDefList(module:Tree):List[Tree] = module match {
+            case ModuleDef(a, b, Template(_, _, list))   => list
             case ClassDef(a, b, c, Template(_, _, list)) => list
-            case _ => throw new Exception("Could not extract Def List from"+x)
+            case _                                       => throw new Exception("Could not extract Def List from"+module)
         }
-        //takes a list of Trees and returns the first trait
-        //as an instance of FixedPoint
+        
+        /** returns a List of FixedPoints, representing the traits found in the List of Trees that has been passed in
+          *
+          * matches each element of the passed in List of Trees to find trees of the following format:
+          *     trait Traitname
+          *     trait Traitname[Types]
+          * returns the List of traits, that match the above format in the simple FixedPoint format
+          *
+          * @param raw the List of Trees that are to be filtered for traits
+          * @return the List of FixedPoints contained in the List
+          */
         def findFixedPoint(raw: List[Tree]): List[FixedPoint] = raw match {
             case q"trait $traitname[..$types]" :: tail => FixedPoint(traitname,reconstructTypes(types).asInstanceOf[List[TypeDef]]) :: findFixedPoint(tail)
-            case head :: tail => findFixedPoint(tail)
-            case _ => Nil//throw new Exception("Could not find Fixed Point (no trait in annotated object)")
-        }
-        //takes a list of Trees  and the name of a Type
-        //and filters the list for case classes extending the given type
-        //turning them into Variants
-        def findVariants(raw: List[Tree]): List[Variant] = raw match{
-            case q"case class $name[..$types](..$fields) extends $fix[..$smth]" :: tail
-              => Variant(name,reconstructTypes(types).asInstanceOf[List[TypeDef]],fields,fix,smth) :: findVariants(tail)
-            case head :: tail => findVariants(tail)
-            case Nil => Nil
-            case _ => throw new Exception("Find Variants Malfunctioned")
-        }
-        def findOthers(raw: List[Tree]):List[Tree] = raw match{
-            case q"case class $name[..$types](..$fields) extends $fix[..$smth]" :: tail => findOthers(tail)
-            case q"trait $traitname[..$types]" :: tail => findOthers(tail)
-            case q"def $init(..$smth) = {..$smth2}" :: tail => findOthers(tail)
-            case head :: tail => head :: findOthers(tail)
-            case Nil => Nil
-        }
-        //Helper Functions
-        def reconstructTypes(x:List[Tree]):List[Tree] = x match{
-            case TypeDef(a,b,c,d) :: tail => TypeDef(a,b,c,reconstructTypesSub(d)) :: reconstructTypes(tail)
-            case AppliedTypeTree(a,b) :: tail => AppliedTypeTree(reconstructTypes(List(a)).head,reconstructTypes(b)) :: reconstructTypes(tail)
-            case head :: tail => head :: reconstructTypes(tail)
-            case Nil => Nil
-        }
-        def reconstructTypesSub(x:Tree):Tree = x match{
-            case TypeBoundsTree(Select(Select(a, b), c), Select(Select(d,e), f)) => TypeBoundsTree(Select(Select(a, newTermName(b.toString)), c), Select(Select(d,newTermName(e.toString)), f))
-            case _ => x        
+            case head :: tail                          => findFixedPoint(tail)
+            case _                                     => Nil//throw new Exception("Could not find Fixed Point (no trait in annotated object)")
         }
 
-        def extractTypes(x:List[ValDef]):List[Tree] = x match{
-            case ValDef(a,b,c,d) :: tail => c :: extractTypes(tail)
-            case _ => x
+        /** returns a List of Variants, representing the case classes found in the List of Trees that has been passed in
+          *
+          * matches each element of the passed in List of Trees to find trees of the following format:
+          *     case class Classname[Types](Vals) extends Extendname[ExtendTypes]
+          * returns the List of case classes, that match the above format in the simple Variants format
+          *
+          * @param raw the List of Trees that are to be filtered for case classes
+          * @return the List of Variants contained in the List
+          */
+        def findVariants(raw: List[Tree]): List[Variant] = raw match{
+            case q"case class $name[..$types](..$fields) extends $fix[..$smth]" :: tail
+                              => Variant(name,reconstructTypes(types).asInstanceOf[List[TypeDef]],fields,fix,smth) :: findVariants(tail)
+            case head :: tail => findVariants(tail)
+            case _            => Nil
+            //case _ => throw new Exception("Find Variants Malfunctioned")
         }
-        //val defs to override
-        def valDefsToOverride(x:List[ValDef]):List[ValDef] = x match{
-            //case _ => x
-            case q"val $name: $typ" :: z => q"override val $name: $typ" :: valDefsToOverride(z)
+        /** returns a List of Trees, representing all the objects or TypeDefs etc. that are not touched by the macro
+          *
+          * returns a List of all the Trees that do not match the following formats:
+          *     case class Classname[Types](Vals) extends Extendname[ExtendTypes]
+          *     trait Traitname
+          *     trait Traitname[Types]
+          *
+          * @param raw the List of Trees that are to be filtered
+          * @return the List of Trees that do not match the above formats contained in the List
+          */
+        def findOthers(raw: List[Tree]):List[Tree] = raw match{
+            case q"case class $name[..$types](..$fields) extends $fix[..$smth]" :: tail => findOthers(tail)
+            case q"trait $traitname[..$types]" :: tail                                  => findOthers(tail)
+            case q"def $init(..$smth) = {..$smth2}" :: tail                             => findOthers(tail)
+            case head :: tail                                                           => head :: findOthers(tail)
+            case _                                                                      => Nil
+        }
+        /** returns a List of Trees, that is equal to the one that has been passed in, except that the type-bounds have been reconstructed
+          *
+          * when extracting TypeDefs of classes or traits, using quasiqotes, the type-bounds sometimes are not constructed correctly
+          * thankfully all the information is there and we can reconstruct them
+          * returns a List of all the Trees as they were, except for TypeDefs and AppliedTypeTrees, in which the type-bounds are reconstructed
+          *
+          * @param typeDefs the List of Trees that are to be checked for misconstructed TypeBounds
+          * @return the List of Trees with reconstructed type-bounds
+          */
+        def reconstructTypes(typeDefs:List[Tree]):List[Tree] = typeDefs match{
+            case TypeDef(a,b,c,d) :: tail     => TypeDef(a,b,c,reconstructTypesSub(d)) :: reconstructTypes(tail)
+            case AppliedTypeTree(a,b) :: tail => AppliedTypeTree(reconstructTypes(List(a)).head,reconstructTypes(b)) :: reconstructTypes(tail)
+            case head :: tail                 => head :: reconstructTypes(tail)
+            case _                            => Nil
+        }
+        /** returns the Trees, that has been passed in, if it was a TypeBoundsTree, the type-bounds have been reconstructed
+          *
+          * when extracting TypeDefs of classes or traits, using quasiqotes, the type-bounds sometimes are not constructed correctly
+          * thankfully all the information is there and we can reconstruct them
+          * this is e helper-function for reconstructTypes, that manages the actual reconstruction
+          *
+          * @param typeDefs the List of Trees that are to be checked for misconstructed TypeBounds
+          * @return the List of Trees with reconstructed type-bounds
+          */
+        def reconstructTypesSub(typeDefs:Tree):Tree = typeDefs match{
+            case TypeBoundsTree(Select(Select(a, b), c), Select(Select(d,e), f)) => TypeBoundsTree(Select(Select(a, newTermName(b.toString)), c), Select(Select(d,newTermName(e.toString)), f))
+            case _                                                               => typeDefs        
+        }
+        /** returns a List of Trees, containing the types of the corresponding values defined by the ValDefs in the Input List
+          *
+          * takes a List of ValDefs and returns a List of Trees, containing the Types of the defined values (in the same order as these values)
+          *
+          * @param valDefs the List of ValDefs to be converted to a List of their types
+          * @return the List of Trees containing the Types of the passed in ValDefs
+          */
+        def extractTypes(valDefs:List[ValDef]):List[Tree] = valDefs match{
+            case ValDef(_,_,c,_) :: tail => c :: extractTypes(tail)
+            case _                       => Nil
+        }
+        /** returns a List of ValDefs, containing the ValDefs that have been passed in, with the override modifier
+          *
+          * As the modifiers are not available in the Context, we either have to cast them or extract them via qusiquote deconstruction
+          * or, as we do here, just reconstruct the values using quasiqotes
+          * takes a List of ValDefs and returns a List of ValDefs, that have the override modifier
+          *
+          * @param valDefs the List of ValDefs that needs the override modifier
+          * @return the List of ValDefs passed in, with the override modifier added to them
+          */
+        def valDefsToOverride(valDefs:List[ValDef]):List[ValDef] = valDefs match{
+            //case _ => valDefs
+            case q"val $name: $typ" :: z         => q"override val $name: $typ" :: valDefsToOverride(z)
             case q"..$smth val $name: $typ" :: z => q"override val $name: $typ" :: valDefsToOverride(z)
-            case Nil => Nil
+            case _                               => Nil
         }
+        /** returns a List of ValDefs, containing the ValDefs that have been passed in, reconstructed in a neutral environment (to remove the case modifier)
+          *
+          * As the modifiers are not available in the Context, we can't modify them easily
+          * therefore we just reconstruct the values using quasiqotes
+          *
+          * @param valDefs the List of ValDefs that need to be cleansed of the case modifier
+          * @return the List of ValDefds cleansed of the case modifier
+          */
         def valDefsToNoCase(x:List[ValDef]):List[ValDef] = x match{
             //case _ => x
-            case q"val $name: $typ" :: z => q"val $name: $typ" :: valDefsToNoCase(z)
+            case q"val $name: $typ" :: z         => q"val $name: $typ" :: valDefsToNoCase(z)
             case q"..$smth val $name: $typ" :: z => q"val $name: $typ" :: valDefsToNoCase(z)
-            case Nil => Nil
+            case _                               => Nil
         }
-        def valDefsToNoCasePlusVal(x:List[ValDef]):List[ValDef] = //x match{
+        /** returns a List of ValDefs, containing the ValDefs that have been passed in, with the val modifier
+          *
+          * As the modifiers are not available in the Context, we can't modify them easily
+          * therefore we extract the desired set of modifiers from the following construct 
+          *     q"class Num[FFunctor](val n:Int)..
+          *
+          * @param valDefs the List of ValDefs that need to be modified
+          * @return the List of ValDefs with the extracted set of modifiers
+          */
+        def valDefsToNoCasePlusVal(valDefs:List[ValDef]):List[ValDef] = //x match{
             q"class Num[FFunctor](val n:Int) extends ExpF[FFunctor]" match{
                 case q"class Num[FFunctor](..$vals) extends ExpF[FFunctor]" => vals match{
-                    case ValDef(a,b,c,d) :: ignore => x match { //Modifiers(scala.reflect.internal.Flags.ACCESSOR.toLong.asInstanceOf[FlagSet] | scala.reflect.internal.Flags.PARAMACCESSOR.toLong.asInstanceOf[FlagSet])
+                    case ValDef(a,b,c,d) :: ignore => valDefs match { //Modifiers(scala.reflect.internal.Flags.ACCESSOR.toLong.asInstanceOf[FlagSet] | scala.reflect.internal.Flags.PARAMACCESSOR.toLong.asInstanceOf[FlagSet])
                         case ValDef(w,x,y,z) :: tail => {ValDef(a,x,y,z) :: valDefsToNoCasePlusVal(tail)}
                         case Nil => Nil
                         case _ => throw new Exception("Could not convert params3")
@@ -97,7 +275,16 @@ object convertMacro {
                 } 
                 case _ => throw  new Exception("Could not convert params1")
             }
-        def valDefWithPrivate(x:List[ValDef]):List[ValDef] = {
+        /** returns a List of ValDefs, containing the ValDefs that have been passed in, with the private modifier
+          *
+          * As the modifiers are not available in the Context, we can't modify them easily
+          * therefore we extract the desired set of modifiers from the following construct 
+          *     q"private class ConsF[T](head: T, tail: Lists[T])..
+          *
+          * @param valDefs the List of ValDefs that need to be modified
+          * @return the List of ValDefs with the extracted set of modifiers
+          */    
+        def valDefWithPrivate(valDefs:List[ValDef]):List[ValDef] = {
             val privMod = q"private class ConsF[T](head: T, tail: Lists[T]) extends Cons[T, Lists[T]](head, tail) with Lists[T]" match {
                 case q"private class ConsF[T]($a, tail: Lists[T]) extends Cons[T, Lists[T]](head, tail) with Lists[T]" => a match {
                         case ValDef(mods,_,_,_) => mods
@@ -105,44 +292,80 @@ object convertMacro {
                 }
                 case _ => throw new Exception("Could not Construct Private Modifier")
             }
-            x match {
+            valDefs match {
                 case ValDef(a,b,c,d) :: z => ValDef(privMod,b,c,d) :: valDefWithPrivate(z)
-                case Nil => Nil
-                case _ => throw new Exception("Could not Construct Private Modifier"+x)
+                case Nil                  => Nil
+                case _                    => throw new Exception("Could not Construct Private Modifier"+valDefs)
             }
         }
-        //clean Type takes a list of TypeDefs or AppliedTrees and
-        //returns a list of references to these types
-        def typeDefsToTypeRefs(x:List[Tree]):List[Tree] = x match {
-            case TypeDef(a,b,List(),d) :: rest => Ident(b) :: typeDefsToTypeRefs(rest)
-            case TypeDef(a,b,c,d) :: rest => AppliedTypeTree(Ident(b),typeDefsToTypeRefs(c)) :: typeDefsToTypeRefs(rest)
-            case AppliedTypeTree(a,b) :: rest => AppliedTypeTree(a,typeDefsToTypeRefs(b)) :: typeDefsToTypeRefs(rest)
-            case _ => x
+        /** returns a List of Trees, containing references to the Types described by the passed in TypeDefs
+          *
+          * takes a List of Trees, that are either TypeDefs or AppliedTypeTrees and returns References to these Types
+          *
+          * @param typeDefs the List of TypeDefs that need to be converted
+          * @return the List of Trees referencing the passed in types
+          */ 
+        def typeDefsToTypeRefs(typeDefs:List[Tree]):List[Tree] = typeDefs match {
+            case TypeDef(a,b,List(),d) :: tail => Ident(b) :: typeDefsToTypeRefs(tail)
+            case TypeDef(a,b,c,d) :: tail      => AppliedTypeTree(Ident(b),typeDefsToTypeRefs(c)) :: typeDefsToTypeRefs(tail)
+            case AppliedTypeTree(a,b) :: tail  => AppliedTypeTree(a,typeDefsToTypeRefs(b)) :: typeDefsToTypeRefs(tail)
+            case head :: tail                  => typeDefsToTypeRefs(tail)
+            case _                             => Nil
             }
-        def applyDefinedValsOfTypeTo(x:List[ValDef], typ:Tree, funName:Ident ):List[Tree] = x match {
+        /** returns a List of Trees, containing references to the passed in ValDefs, with values of a specific type, having the passed in function name applied to them
+          *
+          * takes a List of ValDefs and a type as well as a reference to a Function, iterates through the list and returns a list of references to the 
+          * defined values, values of the type that has been passed in, have the passed in function applied to them
+          *
+          * @param valDefs the List of ValDefs that need to be referenced
+          * @param typ the type of value, that needs to have the function applied to them
+          * @param funName a reference to the function that needs to be applied to specific values
+          * @return the List of Trees containing references to the passed in ValDefs
+          */     
+        def applyDefinedValsOfTypeTo(valDefs:List[ValDef], typ:Tree, funName:Ident ):List[Tree] = valDefs match {
             case ValDef(a,b,c,d) :: z => {
                 if (c.canEqual(typ)) Apply(funName,List(Ident(b))) :: applyDefinedValsOfTypeTo(z,typ,funName)
                 else Ident(b) :: applyDefinedValsOfTypeTo(z,typ,funName) 
             }
-            case Nil => Nil
+            case _                    => Nil
         }
-        //valDefsToValRefs takes a list of valDefs and returns a list of references to the parameters
-        //defined by them (wrapping their names in Idents)
-        def valDefsToValRefs(x:List[ValDef]):List[Ident] = x match {
+        /** returns a List of Idents, containing references to the vales defined by the passed in ValDefs
+          *
+          *
+          * @param valDefs the List of ValDefs that need to be referenced
+          * @return the List of Trees containing references to the passed in ValDefs
+          */ 
+        def valDefsToValRefs(valDefs:List[ValDef]):List[Ident] = valDefs match {
             case ValDef(a,b,c,d) :: z => Ident(b) :: valDefsToValRefs(z) 
-            case Nil => Nil
+            case _                    => Nil
         }
-        //valDefsToSelect
-        //takes a list of ValDefs and a String and returns a list of selects, selecting the parameters
-        //defined by the ValDefs from a term with the given String as its name
-        def valDefsToSelect(x:List[ValDef], modification: String):List[Select] = x match {
+        /** returns a List of Selects, selecting the values defined by the passed in ValDefs from the passed in name
+          *
+          * takes a List of ValDefs and the name of a value. returns a list of Selects (name.valueName) where name is the passed in 
+          * name of a value and valueName is one of the values defined by the passed in ValDefs
+          *
+          * @param valDefs the List of ValDefs that need to be selected
+          * @param modification name of the value, that the values are selected from
+          * @return the List of Selects
+          */ 
+        def valDefsToSelect(valDefs:List[ValDef], modification: String):List[Select] = valDefs match {
             case ValDef(a,b,c,d) :: z => {
                 val tmp=newTermName(modification); 
                 q"$tmp.$b" :: valDefsToSelect(z,modification)} 
-            case Nil => Nil
+            case _                    => Nil
         }
-        //updateType
-        def updateType(x:List[ValDef], name:Tree, types:List[Tree], newType:String ):List[ValDef] = x match {
+        /** returns a List of ValDefs with an updated Type
+          *
+          * takes a List of ValDefs, the name of a Type and its Type Parameters as well as a new Type name. returns a list of ValDefs that is equal to the input List,
+          * with the exception that ValDefs that were of the type name[types] are now of the type newType
+          *
+          * @param valDefs the List of ValDefs that need to be updated
+          * @param name the name of the Type that needs to be replaced
+          * @param types the type Parameters of the Type that needs to be replaced
+          * @param newType the name of the new Type 
+          * @return the List of updated ValDefs
+          */ 
+        def updateType(valDefs:List[ValDef], name:Tree, types:List[Tree], newType:String ):List[ValDef] = valDefs match {
             case ValDef(a,b,c,d) :: z => {
                 q"class ignoreMe extends $c" match {
                     case q"class ignoreMe extends $name2[..$types2]" if(name.toString==name2.toString && types.toString==types2.toString) => ValDef(a,b,Ident(newTypeName(newType.toString)),d) :: updateType(z,name,types,newType.toString) 
@@ -150,7 +373,7 @@ object convertMacro {
                 }
             }
             case Nil => Nil
-            case _ => x
+            case _   => valDefs
         }
 
         val functor = q"""
@@ -158,49 +381,73 @@ object convertMacro {
                 def fmap[A, B](f: A => B)(fa: F[A]): F[B]
             }
         """
+        /*
         val listFunctor = q"""
             implicit def listFunctor: Functor[List] = new Functor[List] {
                 def fmap[A, B](f: A => B)(fa: List[A]): List[B] = fa map f
             }
         """
-        
-        def valDefsToBinds(x:List[ValDef]):List[Tree] = x match{
+        */
+        /** returns a List of Binds, that bind references of the passed in ValDefs 
+          *
+          * takes a List of ValDefs, and returns a List of Binds, binding references to the values defined
+          * by the passed in ValDefs to the WILDCARD, to allow the usage in case expressions
+          *
+          * @param valDefs the List of ValDefs that need to be Bound
+          * @return the List of Binds
+          */ 
+        def valDefsToBinds(valDefs:List[ValDef]):List[Bind] = valDefs match{
             case ValDef(a,b,c,d) :: tail => Bind(newTermName(b.toString), Ident(nme.WILDCARD)) :: valDefsToBinds(tail)
             case Nil => Nil
         }
-        
-        def buildRollBody(input: BusinessInput):Tree = {
+        /** returns a Match with a case for all the Variants
+          *
+          * takes a BusinessView, and creates a Match, that contains a case for all the Variants, to be used in the body of the roll function
+          *
+          * @param input the Business view containing all the Variants
+          * @return the Match
+          */ 
+        def buildRollBody(input: BusinessInput):Match = {
             val cases = input.variants.map( (x:Variant) => {
                 CaseDef(Apply(Ident(newTermName(x.name.toString+"F")), valDefsToBinds(x.valParams)),EmptyTree,Apply(Ident(newTermName(x.name.toString)), valDefsToValRefs(x.valParams)))
             })
             Match(Ident(newTermName("a")), cases)
         }
-        
-        def valDefsAdaptListType(x:List[ValDef],t:TypeName,newN:TypeName):List[ValDef] = x match{
-            case q"..$smth val $name: List[$typ]" :: z if(typ.toString.equals(t.toString)) => q"val $name: List[$newN]" :: valDefsAdaptListType(z,t,newN)
-            case y :: z => y :: valDefsAdaptListType(z,t,newN)
-            case Nil => Nil
-        }
-        def callSfMapOnLists(x:List[ValDef],t:TypeName):List[Tree] = x match {
-            case q"..$smth val $name: List[$typ]" :: z if(typ.toString.equals(t.toString)) => q"sf.fmap(f)(${Ident(name)})" :: callSfMapOnLists(z,t) 
-            case ValDef(a,b,c,d) :: z => Ident(b) :: callSfMapOnLists(z,t) 
-            case Nil => Nil
-        }
-        
-        def valDefsAdaptGeneralType(x:List[ValDef],t:TypeName,newN:TypeName):List[ValDef] = x match{
+        /** returns a List of ValDefs with an updated Type
+          *
+          * takes a List of ValDefs, the name of a Type and a new Type name. returns a list of ValDefs that is equal to the input List,
+          * with the exception that ValDefs that were of the type someName[passed-in-name] are now of the new type
+          *
+          * @param valDefs the List of ValDefs that need to be updated
+          * @param oldType the name of the Type that needs to be replaced
+          * @param newType the name of the new Type 
+          * @return the List of updated ValDefs
+          */ 
+        def valDefsAdaptGeneralType(valDefs:List[ValDef],oldType:TypeName,newType:TypeName):List[ValDef] = valDefs match{
             //case _ => x
-            case q"..$smth val $name: $someType[$typ]" :: z if(typ.toString.equals(t.toString)) => q"val $name: $someType[$newN]" :: valDefsAdaptGeneralType(z,t,newN)
-            case y :: z => y :: valDefsAdaptGeneralType(z,t,newN)
+            case q"..$smth val $name: $someType[$typ]" :: tail if(typ.toString.equals(oldType.toString)) => q"val $name: $someType[$newType]" :: valDefsAdaptGeneralType(tail,oldType,newType)
+            case y :: tail => y :: valDefsAdaptGeneralType(tail,oldType,newType)
             case Nil => Nil
         }
-        def callSfMapOnGeneral(x:List[ValDef],t:TypeName):List[Tree] = x match {
+        /** returns a List of Trees applying map to references of the passed in values if they are of a specific type
+          *
+          * takes a List of ValDefs, and the name of a type, if a valDef is of the type someType[t] the following constuct is created:
+          * sfsomeType.map.value
+          * if it is of a different type, a reference to it is created.
+          *
+          * @param valDefs the List of ValDefs that need to be updated
+          * @param t the type of ValDef that is updated 
+          * @return the List Trees, containing the References or map calls
+          */
+        def callSfMapOnGeneral(valDefs:List[ValDef],t:TypeName):List[Tree] = valDefs match {
             case q"..$smth val $name: $someType[$typ]" :: z if(typ.toString.equals(t.toString)) => {
                 val nameI = Ident(newTermName("sf"+someType.toString))
                 q"$nameI.fmap(f)(${Ident(name)})" :: callSfMapOnGeneral(z,t) 
             }
             case ValDef(a,b,c,d) :: z => Ident(b) :: callSfMapOnGeneral(z,t) 
-            case Nil => Nil
+            case _                    => Nil
         }
+        /*
         def createFunctors(x:List[ValDef],t:Tree):List[Tree] = x match {    
             case q"..$smth val $name: $someType[$typ]" :: z if(typ.toString.equals(t.toString)) => q"""
             implicit def ${newTermName(someType.toString+"Functor")}: Functor[$someType] = new Functor[$someType] {
@@ -210,11 +457,22 @@ object convertMacro {
             case ValDef(a,b,c,d) :: z => createFunctors(z,t) 
             case Nil => Nil
         }
+        */
+        /** returns a List of Trees containing the names of types that need a functor
+          *
+          * takes a List of ValDefs, and the name of a type, if a valDef is of the type someType[t] the someType is added to the return list
+          *
+          * @param valDefs the List of ValDefs that need to be analysed
+          * @param t the type of ValDef that we are looking for 
+          * @return the List of Trees, containing the type names
+          */
         def functorTypes(x:List[ValDef],t:Tree):List[Tree] = x match {    
             case q"..$smth val $name: $someType[$typ]" :: z if(typ.toString.equals(t.toString)) => someType :: functorTypes(z,t) 
             case ValDef(a,b,c,d) :: z => functorTypes(z,t) 
-            case Nil => Nil
+            case _                    => Nil
         }
+        
+        /** a Helper function for recursiveParamTypeApply  */
         def recursivePositionType(x:List[ValDef],t:Tree,r:String):List[ValDef] = {
             val mod = q"class Leaf[R](val tag: Int) extends TreeF[R] {}" match {
                     case q"class Leaf[R](..$vals) extends TreeF[R] {}" => vals(0) match {
@@ -231,6 +489,7 @@ object convertMacro {
             }
         }
         
+        /*
         def recursiveParamType(x:List[ValDef],t:Tree,r:String):List[ValDef] = {
             val mod = q"def apply(n:Int):Tree = new Leaf[Tree](n) with Tree" match {
                     case q"def apply(..$vals):Tree = new Leaf[Tree](n) with Tree" => vals(0) match {
@@ -246,48 +505,67 @@ object convertMacro {
 
             }
         }
-        
-        def recursiveParamTypeApply(x:List[ValDef],t:Tree,r:String,app:List[Tree]):List[ValDef] = {
+        */
+        /** add stuff here
+          */
+        def recursiveParamTypeApply(valDefs:List[ValDef],t:Tree,r:String,app:List[Tree]):List[ValDef] = {
             val mod = q"def apply(n:Int):Tree = new Leaf[Tree](n) with Tree" match {
                     case q"def apply(..$vals):Tree = new Leaf[Tree](n) with Tree" => vals(0) match {
                         case ValDef(a,b,c,d) => a
                     }
             }
-            x match {
+            valDefs match {
             case q"..$smth val $name: $someType[$typ]" :: z if(typ.toString.equals(t.toString)) => {
-                q" $mod val $name: $someType[${newTypeName(r)}[..$app]]" :: recursivePositionType(z,t,r)
+                q" $mod val $name: $someType[${newTypeName(r)}[..$app]]" :: recursiveParamTypeApply(z,t,r,app)//recursivePositionType(z,t,r)
             }
-            case ValDef(a,b,c,d) :: z => ValDef(mod,b,c,d) :: recursivePositionType(z,t,r)
-            case Nil => Nil
+            case ValDef(a,b,c,d) :: z => ValDef(mod,b,c,d) :: recursiveParamTypeApply(z,t,r,app)//recursivePositionType(z,t,r)
+            case _                    => Nil
 
             }
         }
-        
+        /** returns the toString expression for a list of params
+          *
+          * @param params the values that need to be printed
+          * @return the toString expression
+          */
         def createPrintTree(params:List[Tree]):Tree = params match{
 			case head :: tail => createPrintTreeSub(q"${head}.toString",tail)
-			case Nil => null//throw new Exception("No params")
+			case _ => null//throw new Exception("No params")
 		}
+        /** helper function for createPrintTree*/
 		def createPrintTreeSub(soFar:Tree, params:List[Tree]):Tree = params match{
-			case one :: tail => createPrintTreeSub(q"""${soFar} + "," + ${one}.toString""",tail)
-			case Nil => soFar
+			case head :: tail => createPrintTreeSub(q"""${soFar} + "," + ${head}.toString""",tail)
+			case _ => soFar
 		}
+        /** returns the equals expression for a list of params
+          *
+          * @param params the values that need to be equated
+          * @return the equals expression
+          */
 		def createEqualsTree(params:List[Tree]):Tree = params match{
 			case head :: tail => createEqualsTreeSub(q"this.${newTermName(head.toString)}.equals(thats.${newTermName(head.toString)})",tail)
-			case Nil => null
+			case _ => null
 		}
+        /** helper function for createEqualsTree*/
 		def createEqualsTreeSub(soFar:Tree, params:List[Tree]):Tree = params match{
 			case head :: tail => createEqualsTreeSub( q"${soFar} && this.${newTermName(head.toString)}.equals(thats.${newTermName(head.toString)})",tail)
-			case Nil => soFar
+			case _ => soFar
 		}
+        /** returns the hash expression for a list of params
+          *
+          * @param params the values that need to be hashed
+          * @return the toString expression
+          */
 		def createHashTree(params:List[Tree]):Tree = params match{
 			case head :: tail => createHashTreeSub(q"${newTermName(head.toString)}.hashCode()",tail)
-			case Nil => null
+			case _ => null
 		}
+        /** helper function for createHashTree*/
 		def createHashTreeSub(soFar:Tree, params:List[Tree]):Tree = params match{
-			case head :: tail => createHashTreeSub(q"${newTermName(head.toString)}.hashCode() + soFar",tail)
-			case Nil => soFar
+			case head :: tail => createHashTreeSub(q"${newTermName(head.toString)}.hashCode() + $soFar",tail)
+			case _ => soFar
 		}
-        
+        /*
         def countChilds(x:List[ValDef], name:Tree, types:List[Tree]):Int = x match {
             case ValDef(a,b,c,d) :: z  => {
                 q"class ignoreMe extends $c" match {
@@ -298,21 +576,40 @@ object convertMacro {
             case Nil => 0
             case _ => 0
         }
-		def nonChilds(x:List[ValDef], name:Tree, types:List[Tree]):List[ValDef] = x match {
-            case ValDef(a,b,c,d) :: z  => {
+        */
+        /** returns a List of ValDefs that are not of a specific type
+          *
+          *
+          * @param valDefs the List of ValDefs that need to be analysed
+          * @param name the name of the type
+          * @param types the type parameters of the type
+          * @return the List of ValDefs that are not of the specified type
+          */
+		def nonChilds(valDefs:List[ValDef], name:Tree, types:List[Tree]):List[ValDef] = valDefs match {
+            case ValDef(a,b,c,d) :: tail  => {
                 q"class ignoreMe extends $c" match {
-                    case q"class ignoreMe extends $name2[..$types2]" if(name.toString==name2.toString && types.toString==types2.toString) => nonChilds(z,name,types) 
-                    case _ => ValDef(a,b,c,d) :: nonChilds(z,name,types)
+                    case q"class ignoreMe extends $name2[..$types2]" if(name.toString==name2.toString && types.toString==types2.toString) => nonChilds(tail,name,types) 
+                    case _ => ValDef(a,b,c,d) :: nonChilds(tail,name,types)
                 }
             }
             case _ => Nil
         }
+        /*
 		def createWildcards(x:List[Tree]):List[Tree] = x match {
 			case TypeDef(a,b,List(),d) :: tail => Bind(tpnme.WILDCARD, EmptyTree) :: createWildcards(tail)
 			case AppliedTypeTree(a,b) :: tail => Bind(tpnme.WILDCARD, EmptyTree) :: createWildcards(tail)
 			case Nil => Nil
 			case _ => throw new Exception("Could not create wildcards")
         }
+        */
+        /** returns a List of ValDefs that portray a list of implicit parameters for the passed functors
+          *
+          * takes a List of Trees, that contain the name of the Functor types, and creates a List of ValDefs, that have the implicit modifier,
+          * the name sfname and the type name
+          *
+          * @param fcns the List of Type names, that we need to create a ValDef for
+          * @return the List of ValDefs 
+          */
         def createValsForFunctors(fcns:List[Tree]):List[ValDef] = fcns match{
             case func :: tail => {
                     val name = func.toString
@@ -324,8 +621,13 @@ object convertMacro {
         }
         
         
-        //case class FixedPoint(name: TypeName, typeParams: List[TypeDef])
-        //case class Variant(name: TypeName, typeParams: List[TypeDef], valParams: List[ValDef], extend: Tree, extendTypes: List[Tree])
+        /** returns a List of Trees, containing the expanded traits
+          *
+          * see the above example, to see what a trait is expanded into
+          *
+          * @param input the BusinessView containing the FixedPoints
+          * @return the List of Trees, containing the expanded FixedPoints
+          */
         def expandTrait(input: BusinessInput):List[Tree] = {
             input.fixed.map((fix:FixedPoint) => {
                 val newtrait     = newTypeName(fix.name.toString+"F")
@@ -355,9 +657,18 @@ object convertMacro {
                             case Template(x,y,z) => Template(List(tr),y,z)
                         }    
                 }
+                
                 val typeRefA = traitTypesRef++List(Ident(newTypeName("A")))
                 val typeRefB = traitTypesRef++List(Ident(newTypeName("B")))
-                val func = if(fix.typeParams.length>0) q"""implicit def someFunctor[..${fix.typeParams}]: Functor[$newtrait] = new Functor[$newtrait] {
+				val typeRefR = traitTypesRef++List(Ident(newTypeName("R")))
+                val lambdaTypeDefR = q"implicit def someFunctor[..${fix.typeParams}]: Functor[({ type lambda[R] = $newtrait[..$typeRefR] })#lambda] = ???" match {
+                    case q"implicit def someFunctor[..${fix.typeParams}]: Functor[({ type lambda[$lambdaDefR] = $newtrait[..$typeRefR] })#lambda] = ???" => lambdaDefR match {
+                        case TypeDef(a,b,c,d) => TypeDef(a,newTypeName("R"),c,d)
+                        case _ => throw new Exception("Could not construct lambda TypeDef")
+                    }
+                    case _ => throw new Exception("Could not extract lambda TypeDef")
+                }
+                val func = if(fix.typeParams.length>0) q"""implicit def someFunctor[..${fix.typeParams}]: Functor[({ type lambda[$lambdaTypeDefR] = $newtrait[..$typeRefR] })#lambda] = new Functor[({ type lambda[$lambdaTypeDefR] = $newtrait[..$typeRefR] })#lambda] {
                                                                 def fmap[A, B](f: A => B)(fa: $newtrait[..$typeRefA]): $newtrait[..$typeRefB] = fa map f
                                                         } """
                             else q"""implicit def patternFunctor: Functor[$newtrait] = new Functor[$newtrait] {
@@ -389,7 +700,13 @@ object convertMacro {
                 }
             ).flatten
         }
-
+        /** returns a List of Trees, containing the expanded classes
+          *
+          * see the above example, to see what a class is expanded into
+          *
+          * @param input the BusinessView containing the Variants
+          * @return the List of Trees, containing the expanded Variants
+          */ 
         def expandClasses(input: BusinessInput):List[Tree] = {
             
             input.variants.map( (vari:Variant) => {
@@ -416,7 +733,7 @@ object convertMacro {
                 //println(functor)
                 val updatedParams = recursivePositionType(vari.valParams,vari.extend,r)
                 val parRefsT = valDefsToValRefs(recursivePositionType(vari.valParams,vari.extend,oldtrait.toString))
-                val updatedParamsP = recursiveParamType(vari.valParams,vari.extend,oldtrait.toString)
+                //val updatedParamsP = recursiveParamType(vari.valParams,vari.extend,oldtrait.toString)
                 
                 
                 val fixTypeDef = q"type R"
@@ -431,9 +748,7 @@ object convertMacro {
                                 else Ident(oldtrait) 
                                 
                 val appExtendTypes = typesRef++List(appExtend)
-                println("#"*50)
-                println(fixTypesDef)
-                println("#"*50)
+
                 val str = createPrintTree(parRefs)
                 val toStr = if(str != null)
                     q"""override def toString():String = {
@@ -468,7 +783,7 @@ object convertMacro {
                 val sTypesRef= typesRef ++ List(Ident(newTypeName("S")))
                 val mapFun = if (funcList.length>0) if(vari.extendTypes.length>0) q"""def map[S](f: $rType => S)(implicit ..$funcList): $newtrait[..$sTypesRef] = 
                                                                     new ${vari.name} [..$sTypesRef](..${callSfMapOnGeneral(vari.valParams,oldtrait)})"""
-                                                    else q"""def map[S](f: $rType => S)(implicit sf: Functor[$functor]): $newtrait[S] = new ${vari.name} [S](..${callSfMapOnGeneral(vari.valParams,oldtrait)})"""
+                                                    else q"""def map[S](f: $rType => S)(implicit ..$funcList): $newtrait[S] = new ${vari.name} [S](..${callSfMapOnGeneral(vari.valParams,oldtrait)})"""
                              else if(vari.extendTypes.length>0) q"""def map[S](f: $rType => S): $newtrait[..$sTypesRef] = 
                                                                     new ${vari.name} [..$sTypesRef](..${callSfMapOnGeneral(vari.valParams,oldtrait)})"""
                                                     else q"""def map[S](f: $rType => S): $newtrait[S] = new ${vari.name} [S](..${callSfMapOnGeneral(vari.valParams,oldtrait)})"""
@@ -503,20 +818,40 @@ object convertMacro {
             }
             ).flatten
         }
-
+        /** returns a List of Trees, containing the expanded FixedPoints and Variants
+          *
+          * see the above example, to see what the expansion looks like
+          *
+          * @param input the BusinessView containing the FixedPoints and Variants
+          * @return the List of Trees, containing the expanded FixedPoints
+          */
         def businessLogic(input: BusinessInput): List[Tree] = {
             expandTrait(input) ++ expandClasses(input)
         }
+        /** returns a BusinessInput, containing simplified views of FixedPoints and Variants as well as the unmodified passThrough values
+          *
+          * see the above example, to see what a trait is expanded into
+          *
+          * @param raw the list of Trees, that is searched for FixedPoints and Variants
+          * @return the List of Trees, containing the expanded FixedPoints
+          */
         def createInput(raw: List[Tree]): BusinessInput = {
             BusinessInput(findFixedPoint(raw), findVariants(raw), findOthers(raw))
         }
+        /** returns a List of Trees, containing the expanded traits
+          *
+          * see the above example, to see what the expansion looks like
+          *
+          * @param original the annotated trait or object
+          * @return the List of Trees, containing the expanded FixedPoints
+          */
         def createOutputTrait(original: Tree): Tree = 
             original match {
                 case mod @ ClassDef(a, objectName, smth, templ) =>
                     templ match {case Template(a,b,c) => 
                         q"""
                          trait $objectName extends ..$a{
-                           ..${businessLogic(createInput(extractDefListTrait(original)))}
+                           ..${businessLogic(createInput(extractDefList(original)))}
                         }"""
                 }
                 case mod @ ModuleDef(a, objectName, templ) =>
@@ -535,52 +870,11 @@ object convertMacro {
         }      
         
         val res = createOutputTrait(expandees(0))
-        println(res)
+        //println(res)
         
         println("="*50)
         //println(showRaw(res))
-        
-        println("="*50)
-        /*
-        println(showRaw(q"""trait ConvertMe {
-  trait TreeF[R] {
-    def map[S](f: R => S)
-      (implicit sf: Functor[List]):
-        TreeF[S]
-  }
-  trait Tree extends TreeF[Tree]{
-    def fold[T](f: TreeF[T] => T): T = f(map (_ fold f))
-  }
-  object TreeF {
-    implicit def patternFunctor: Functor[TreeF] = new Functor[TreeF] {
-      def fmap[A, B](f: A => B)(fa: TreeF[A]): TreeF[B] = fa map f
-    }
-  }
-  class Leaf[R](val tag: Int) extends TreeF[R] {
-      def map[S](f: R => S)(implicit sf: Functor[List]): TreeF[S] = new Leaf[S](tag)
-  }
-  object Leaf{
-    def apply(tag:Int):Tree = new Leaf[Tree](tag) with Tree
-    def unapply[R](u:TreeF[R]): Option[Int] = u match{
-        case b:Leaf[R] => Some(b.tag)
-        case _ => None
-    }
-  }
-  class Branch[R](val children: List[R]) extends TreeF[R] {
-    def map[S](f: R => S)(implicit sf: Functor[List]): TreeF[S] = new Branch[S](sf.fmap(f)(children))
-  }
-  object Branch{
-     def apply(children:List[Tree]):Tree = new Branch[Tree](children) with Tree//R?
-     def unapply[R](u:TreeF[R]): Option[List[R]] = u match{
-            case b:Branch[R] => Some(b.children)
-            case _ => None
-    }
-  }
-  } """)) */
-        println("="*50)
-        println("="*50)
-        println("="*50)
-        //println(showRaw(res))
+
         val outputs = expandees
         
         
